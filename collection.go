@@ -9,6 +9,7 @@ import (
 
 	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/btf"
+	bpferrors "github.com/cilium/ebpf/errors"
 	"github.com/cilium/ebpf/internal"
 	"github.com/cilium/ebpf/internal/kconfig"
 )
@@ -451,7 +452,7 @@ func (cl *collectionLoader) loadMap(mapName string) (*Map, error) {
 
 	mapSpec := cl.coll.Maps[mapName]
 	if mapSpec == nil {
-		return nil, fmt.Errorf("missing map %s", mapName)
+		return nil, &bpferrors.MapMissErr{Name: mapName}
 	}
 
 	if replaceMap, ok := cl.opts.MapReplacements[mapName]; ok {
@@ -481,7 +482,7 @@ func (cl *collectionLoader) loadProgram(progName string) (*Program, error) {
 
 	progSpec := cl.coll.Programs[progName]
 	if progSpec == nil {
-		return nil, fmt.Errorf("unknown program %s", progName)
+		return nil, &bpferrors.ProgMissErr{Name: progName}
 	}
 
 	// Bail out early if we know the kernel is going to reject the program.
@@ -741,6 +742,9 @@ func ebpfFields(structVal reflect.Value, visited map[reflect.Type]bool) ([]struc
 
 		// If the field is tagged, gather it and move on.
 		name := field.Tag.Get("ebpf")
+		if strings.Contains(name, ",") {
+			name = strings.Split(name, ",")[0]
+		}
 		if name != "" {
 			fields = append(fields, field)
 			continue
@@ -812,8 +816,13 @@ func assignValues(to interface{},
 	for _, field := range fields {
 		// Get string value the field is tagged with.
 		tag := field.Tag.Get("ebpf")
+		ignore := false
 		if strings.Contains(tag, ",") {
-			return fmt.Errorf("field %s: ebpf tag contains a comma", field.Name)
+			tags := strings.Split(tag, ",")
+			tag = tags[0]
+			if len(tags) > 1 && tags[1] == "omitempty" {
+				ignore = true
+			}
 		}
 
 		// Check if the eBPF object with the requested
@@ -825,6 +834,9 @@ func assignValues(to interface{},
 
 		// Get the eBPF object referred to by the tag.
 		value, err := getValue(field.Type, tag)
+		if bpferrors.IsIgnore(err) && ignore {
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("field %s: %w", field.Name, err)
 		}
